@@ -1,977 +1,1130 @@
-# App Spec
-
 ## 1. Core concept
 
-The app is a ChatGPT-like interface where conversations are **non-linear** and visualized in **columns** as a 2D branching tree.
+The app is a ChatGPT-like interface where conversations are **non-linear** and represented as a **tree of nodes**, each node being a **single column** in the UI.
 
-* **Vertical axis**: time within a single “chat block” (a self-contained thread).
-* **Horizontal axis**: branching depth.
+* **Vertical axis**: time within a single column (a linear chat between user and LLM).
+* **Horizontal axis**: branching depth in the conversation tree.
 
-  * When the user asks about a specific fragment of text, a **new chat block** is created in a new (or existing) column to the right, visually linked to that fragment.
+Each **column = one node** in the JSON tree:
 
-The **initial chat in the first column** is just a special case of a **chat block**. Every block, including the first, behaves the same: it holds a linear conversation between the user and the LLM, can have branches, and has an AI-generated header.
+* The **root column** is the entry point of the session.
+* From any message, the user can select text and spawn a **child column** to the right.
+* Under the hood, the app stores the **full tree** (all nodes and branches).
+* In the UI, the user **explores one branch at a time**: the visible columns are the nodes along the active path from the root to the currently focused node.
+* The user can jump back into already explored branches by clicking highlights that represent previously created branches.
+
+Every column/node:
+
+* Holds a linear conversation (user and LLM messages).
+* Has an AI-generated header (the root column header becomes the session name).
+* Knows which parent selection it came from.
+* Can itself spawn further branches.
 
 ---
 
 ## 2. Terminology
 
-* **Column**
-  Vertical strip of content at a given horizontal depth (0 = root). A column can contain multiple chat blocks.
+* **Session**
+  A complete non-linear conversation tree, starting from a single root column and containing all derived branches. Stored as a JSON in the browser local storage.
 
-* **Chat block**
-  A self-contained linear conversation thread:
+* **Node / Column**
+  A single linear chat thread and a single node in the session tree.
 
-  * Contains an **AI-generated header**.
-  * Contains a sequence of user prompts and LLM responses.
-  * Has its own **linear input** at the bottom (for continuing that thread).
-  * Is visually anchored to a **source selection** in the column to its left (except the first/root block, which has no source).
+  * Exactly one node per column.
+  * Each node has:
+
+    * An AI-generated header.
+    * A linear list of messages.
+    * A reference to its **parent node** (the root doesn't have one).
+    * A reference to the **text selection** that created it.
+    * A depth (0 for root, 1 for its children, etc.).
 
 * **Message**
-  Individual user prompt or LLM response within a chat block.
+  One user prompt or one LLM response inside a node.
 
 * **Linear input field**
-  The input at the bottom of a chat block used to continue that thread.
+  The main input at the bottom of a column, used to continue that node’s chat linearly.
 
-* **Branch input field**
-  A temporary input that appears **above a text selection**; sending it creates a **new chat block** to the right.
+* **Context input field**
+  A temporary mini input that appears **above a text selection** inside a message. Sending from it creates a **new child node / column** to the right.
+
+* **Highlight**
+  A persistent visual mark on a text selection that has at least one branch associated with it. Highlights indicate places where branches exist and let the user navigate to those branches. The highlight who's child node is open on the right appears brighter than the other highlights in the same column.
+
+* **Active branch**
+  The ordered list of node ids from the root node to the current node. Columns on screen always correspond to the active branch only. It always starts with the root/0 but not necessarily ends with the last node in the branch. The following nodes if there are any can be opened by clicking/tapping the highlights.
 
 ---
 
 ## 3. Layout & appearance
 
-### 3.1 Columns
+### 3.1 Global layout
 
-* Columns are laid out horizontally from left to right.
+* Overall design is **minimalistic**, with no decorative elements.
+* Typeface: **Helvetica** for all text (other standard sans-serif if no Helvetica).
+* Background: white.
+* **Thin gray lines** separate main UI areas (e.g., top bar from content, columns from each other, vertical column bars shown when a column is out of the viewport).
 
-* A column is created at depth **k+1** when a chat block is created branching from a block in column **k** (if column k+1 doesn’t already exist).
+At the very top:
 
-* **Width**: each column has a max width of approximately `max-w-2xl`.
+* A **viewport-wide bar** spans the full width.
+* On the **left** inside this bar:
 
-  * On narrow viewports, columns shrink to fit while maintaining a consistent, readable width.
+  * A **Lucide “square-menu” icon button**.
+  * Immediately to the right of it: the **app name** (plain text).
+* The top bar has a thin gray line at its bottom edge to separate it from the main content.
 
-* At any given time, **one column is “current”**:
+Below the top bar:
 
-  * It is centered in the viewport.
-  * It is visually emphasized (e.g. slight shadow, higher opacity).
+* The main content area is a horizontally scrollable row of columns (the active branch).
+* Each column extends from below the top bar to the bottom of the viewport and can be scrolled vertically separately from the others.
 
-### 3.2 Chat block structure
+### 3.2 Root column initial state
 
-Each chat block includes:
+The **root column**:
 
-1. **Header**
+* Sits on the **left** side of the main area.
+* Has maximum width of approximately `max-w-3xl`.
+* Uses the full available height between top bar and viewport bottom.
 
-   * Short title phrase generated by the AI based on the content of the block (e.g. “Clarifying matrix multiplication”, “Example for clause X”).
-   * Displayed at the top of the block as its label.
-   * For the first/root chat block, its header is also used as the session name, and the session title is always kept identical to this header.
-   * Until the first LLM response arrives, the header may be empty; the UI can show a neutral placeholder such as “New thread” or a loading indicator.
+Initial state of a new session, before any messages:
 
-2. **Messages area**
+* The column contains:
 
-   * A vertical sequence of:
+  * A **centered placeholder block** in the main area with:
 
-     * User prompts
-     * LLM responses
-     * Optional system/UI elements (e.g. loading indicator, error messages) that are rendered purely in the UI and are not stored as messages.
+    * Text: `"A new rabbithole entrance is right here"`.
+    * A **Lucide “arrow-down” icon** below the text.
+  * A **floating “Ask anything” linear input** at the bottom:
 
-3. **Linear input**
+    * Sticks to the bottom of the column (above any system scroll indicators).
+    * Minimal padding and minimal corner rounding.
+    * Includes an integrated **Send button** on the right side.
+    * Submit is triggered by:
 
-   * At the bottom of the block, directly under the last LLM response that has no user reply yet.
-   * Used to extend the conversation linearly within that block.
+      * Clicking the Send button, or
+      * Pressing Enter (with appropriate handling for multiline if implemented).
 
-4. **Visual container**
+As soon as the first conversation turn starts (user sends the first message), the placeholder disappears permanently for that session.
 
-   * The whole block has a subtle border or card-like background, so multiple blocks in the same column are clearly distinct.
-   * The block can be in expanded or collapsed state (see §6).
+### 3.3 Column structure
 
-### 3.3 Message styling
+Each visible column (node) shows:
 
-Within each chat block:
+* **Header area** at the top of the column content:
 
-* **User prompts**
+  * The AI-generated h3 header (short title describing the node).
+  * Stays fixed at the top of that column’s scrollable area.
+* **Messages area** below the header:
 
-  * Horizontally aligned to the **right**.
-  * Occupy **90%** of the column width.
-  * Have a **soft blue background** (bubble/card style).
-  * Include timestamp or small metadata as needed (optional visual detail).
+  * A vertically scrolling stack of messages.
+  * The scroll is **per column** and independent across columns.
+* **Linear input area** at the bottom of the column:
 
-* **LLM responses**
+  * Floats at the bottom of that column’s scrollable viewport.
+  * For the **current/focused column**, the linear input is active and visible.
+  * For other visible columns, the linear input is hidden completely.
+  * Every column has some additional padding at the bottom to prevent the linear input field from overlapping with the column content.
 
-  * Horizontally aligned to the **left**.
-  * Occupy **90%** of the column width.
-  * Neutral/light background, distinct from user bubbles.
+Columns are separated from each other visually by a thin vertical gray line, same as those separation other elements.
 
-* Messages stack vertically in chronological order:
+### 3.4 Message styling
 
-  * User → LLM → User → LLM → …
+Within any column:
 
-### 3.4 Linear input field
+* **User messages**:
 
-For each chat block:
+  * Right-aligned.
+  * Max width ~**80%** of the column width.
+  * Light gray background.
+  * Minimal border radius.
+  * User can use markdown for formatting.
 
-* There is exactly one linear input associated with that block:
+* **LLM messages**:
 
-  * It is rendered under the last LLM response that does not yet have a user message under it.
-  * In total, there is at most one linear input per block, but only inputs that belong to the current column are active.
+  * Left-aligned.
+  * Occupy **the full column width**; they do not sit inside a visible container.
+  * No distinct background container; just text with standard spacing and typographic hierarchy.
+  * Support **markdown rendering** (headings, lists, code, emphasis) to improve readability. The LLM is instructed to use markdown if it serves the purpose.
 
+Messages appear in strict chronological order:
+
+* User → LLM → user → LLM → …
+
+### 3.5 Input fields
+
+**Linear input field** (per column):
+
+* Located at the bottom of the active column.
 * Styling:
 
-  * Uses the same bubble/card style as a user prompt (aligned right, 90% width, soft blue container).
-  * Inside that bubble is a white text input (textarea).
-
+  * Floats at the bottom.
+  * A white text input area inside.
+  * Minimal padding from the column edges and bottom.
+  * Minimal rounding.
+  * Integrated Send button on the right.
 * Behavior:
 
-  * On send (Enter / Send button):
+  * In the **current column**, the input is visible:
 
-    * The text is treated as the new user prompt for that block.
-    * A request is sent to the LLM (see §§11–12).
-    * When the LLM response arrives, a user message and an assistant message are appended to the block’s messages; a new linear input then appears under the new assistant message.
+    * Focusable, editable, and can submit data.
+  * In **other visible columns** the input is hidden.
+  * On send:
 
-* Linear inputs in non-current columns are still visibly rendered to preserve layout, but they are inactive: they cannot be focused or typed into until their column becomes current.
+    * The text is treated as a new prompt for this node.
+    * The app sends a request to the LLM (see §10).
+    * The new user message appears in the message list, followed by the LLM response when received.
 
-This logic is identical for:
+**Context input field**:
 
-* The **initial chat block** in the first column.
-* Every **child chat block** in any column.
+* Appears when the user selects non-empty text within any message (user or LLM).
+* Styling:
+
+  * A mini version of the linear input:
+
+    * Smaller width.
+    * Minimal rounding.
+    * Appears directly **above** the selected text, anchored visually to it.
+* Behavior:
+
+  * On send:
+
+    * The context input disappears.
+    * A new **child column** is created to the **right** of the column where the selection was made. It contains the user message that's jsut been sent.
+    * The app sends a request to the LLM (see §10) and then adds a generated header and a response to the user message to that new column.
+    * The selected text becomes a **highlight** (see §5.3).
 
 ---
 
-## 4. Navigation & column behavior
+## 4. Column & navigation behavior
 
-### 4.1 Current column
+### 4.1 Current / focused column
 
-* Exactly one column at a time is considered current and is centered.
-* Interactions such as typing into linear inputs, keyboard shortcuts, and primary scrolling focus happen in this column, but text selection can occur in any visible column.
-* Only the linear inputs in the current column accept focus and keyboard input; linear inputs belonging to blocks in other columns are visually present but inactive until those columns become current.
+At any moment, exactly **one column is “current”**.
 
-### 4.2 Horizontal navigation
+* The current column:
 
-* **Desktop:**
+  * Has an active linear input.
+  * Looks normal, while in other columns all the elements are 15% paler.
 
-  * **Floating left/right arrow buttons** placed immediately left and right of the current column.
+The user can change focus by clicking or tapping anywhere inside a column (header, message area, or input). Any interaction with a column makes it the current/focused.
 
-    * Clicking left moves focus to the previous column (if any).
-    * Clicking right moves focus to the next column (if any).
+Horizontal scroll also changes focus. The algorythm making that possible works the following way:
 
-* **Mobile:**
+As the user scrolls horizontally, compute how far they are between the left and right ends (from 0% to 100%). Place an invisible **focus point** inside the viewport at the same percentage between its left and right edges. The **focused column** is always the one that covers this focus point.
 
-  * **Swipe left/right** horizontally to move between columns, like a carousel.
+The user can focus on a column without scrolling, just by interacting with it as described above. But as soon as the content is horizontally scrolled for more than 5% of the viewport width, the scroll algorythm takes control back.
 
-* When moving:
+### 4.2 Vertical scrolling
 
-  * The new column slides into the center.
-  * The arrows/swipe targets update (no left arrow if you’re on the leftmost column, etc.).
+* Every column has its own **independent vertical scroll**.
+* Scrolling one column does not affect the scroll of others.
+* The **linear input**cis fixed to the bottom of the column’s viewport, so it remains visible as the user scrolls messages.
+* The content has additional padding at the bottom to account for the linear input field height.
+
+### 4.3 Horizontal scrolling
+
+* The row of columns for the active branch can be **wider than the viewport**.
+* When there are more columns than fit horizontally:
+
+  * The user can scroll horizontally:
+
+    * With scrollbars on desktop.
+    * With horizontal drag/swipe on touch devices.
+
+### 4.4 Hidden column indicators (edge bars)
+
+When a column is fully offscreen to the left or right:
+
+* A **vertical bar** appears along that viewport edge representing that hidden column.
+* The bar:
+
+  * Spans from the bottom of the top bar to the bottom of the viewport.
+  * Has the column’s header text written **vertically**, rotated 90° clockwise.
+  * Use a thin gray border same as the other elements and white background.
+
+If multiple columns are hidden on one side:
+
+* Their vertical bars are **stacked** along that edge.
+* Each bar corresponds to one hidden column (ordered consistently, e.g., nearest to the visible area first).
+
+Interaction:
+
+* Clicking or tapping a bar:
+
+  * Scrolls horizontally so that the represented column comes back into view. It's left/right edge (depending on behind which side of the viewport it was hidden) is aligned with the closest to the center edge bar left after that. If there is no edge bars left, it aligns with the viewport edge.
+  * Focuses the column the edge bar represented.
 
 ---
 
 ## 5. Branching interactions
 
-### 5.1 Selecting text
+### 5.1 Selecting text & context input
 
-* The user can click-and-drag to select **any text** inside any message (user or LLM) in any column.
-* Once there is a non-empty selection:
+* The user can select any contiguous range inside a message in any visible column.
+* Once a non-empty selection exists (and if it is not spanning text from more than one message), a **context input field** appears directly above the selection.
 
-  * The selected text is visually **highlighted** (e.g. slightly tinted background).
-  * A **branch UI affordance** appears near the selection:
+The user can:
 
-    * The **branch input field**.
+* Type a prompt in the context input.
+* Send the prompt (Enter or Send button).
+* Cancel by clicking outside or clearing the selection.
 
-### 5.2 Branch input field
+### 5.2 Creating a new branch column
 
-* The branch input field appears **above or near the selection**, anchored to its vertical position.
-* It is a small text input (or compact bubble) that lets the user **ask a question specifically about the highlighted fragment**.
-* Behavior:
+When the user sends a prompt via the **context input**:
 
-  * User types a prompt and presses Enter or clicks “Send”.
-  * On send:
+1. The selection (text and offsets) is captured (and cancelled as if the user clicked out or pressed Esc) and highlighted.
+2. A new **child node** is created in the session tree with:
 
-    * The branch input field disappears.
-    * A new **chat block** is created in the **column to the right** of the column where the selection lives.
+   * Parent node id = the node where the selection was made.
+   * Parent message id = the message containing the selection.
+   * Selection text and character offsets.
+3. A new **column** is created to the **right** of the parent column:
 
-### 5.3 Creating a new chat block from a selection
+   * The new column becomes the **last column** in the active branch.
+   * The active branch is updated to include this new node at the end.
+4. The new column’s header is initially filled with gray slightly rounded placeholder block representing future header (until the LLM suggests one).
+5. The LLM request is built with full branch context (see §10).
+6. When the LLM responds:
 
-Given a selection in column k:
+   * The context prompt becomes the first user message in the new column.
+   * The LLM reply becomes the first assistant message in that column.
+   * The column’s header is set from the LLM-provided header.
 
-1. Determine child column:
+### 5.3 Highlights and branch switching
 
-   * If column k+1 does not exist yet, create it.
-   * If it exists, a new chat block is added to that column.
+Highlights represent selections that **already have branches**:
 
-2. Create a chat block at aligned height:
+* When a context input is sent and a child node is successfully created:
 
-   * Compute the vertical position of the highlighted text in column k.
-   * In column k+1, create a new chat block whose initial anchor position aligns vertically with that selection.
-   * Draw a connector line from the selection in column k to the new chat block’s container in column k+1.
+  * The selected text in the parent message becomes a **persistent highlight**.
+* Highlight states:
 
-3. Populate the new chat block:
+  * **Active highlight**:
 
-   * Use the LLM’s block_header field (see §11.6) as the AI-generated header summarizing the new branch, based on the selection and the user’s branch question.
-   * Inside the block:
+    * The highlight whose child node lies on the **current active branch**, i.e. in the column on the right (for that selection).
+    * Appears brighter or more saturated.
+  * **Inactive highlight**:
 
-     * Treat the branch prompt as the new user input for this block.
-     * Request and then render the LLM’s response as the first assistant message.
-     * Render a linear input under that response for continuing this branch.
+    * Highlights whose child nodes are **not** on the current active branch, i.e. not displayed on the right.
+    * Appear slightly **paler** but remain visible.
 
-4. Persist highlight & link:
+Interaction with highlights:
 
-   * The selection in the parent message remains highlighted.
-   * The connector line persists, visually affiliating this chat block with its source text.
+* Clicking an inactive highlight:
 
-### 5.4 Branching from deeper columns
-
-* The same mechanism works recursively:
-
-  * A selection in column **k** produces a chat block in column **k+1**.
-  * That chat block can itself contain messages that can be selected to spawn blocks in column **k+2**, and so on.
-
----
-
-## 6. Multiple chat blocks per column & collision handling
-
-### 6.1 Multiple chat blocks
-
-* Any column can have **multiple chat blocks**:
-
-  * e.g., multiple selections in column 1 can each spawn their own chat blocks in column 2.
-  * All of these blocks live in column 2 at different vertical positions, each linked back to their respective selections.
-
-### 6.2 Initial positioning
-
-* For each new chat block in column **k**:
-
-  * Its **initial vertical position** is aligned so that the top of the block is at the same height as its **source selection** in column **k-1**.
-
-### 6.3 Overlap detection (“too close”)
-
-* After positioning, the system checks for **vertical overlap** between chat blocks in the same column:
-
-  * If two or more blocks intersect or are within a defined minimal gap, they are considered **too close**.
-
-### 6.4 Collapse & expand behavior
-
-When overlap is detected:
-
-1. The overlapping chat blocks (the ones in that “crowded” vertical region) switch to **collapsed state**:
-
-   * A collapsed block shows a compact summary:
-
-     * The header.
-     * Possibly a short snippet or icon indicating it contains a conversation.
-   * The full message history and linear input are hidden.
-
-2. Their positions are **adjusted**:
-
-   * The blocks are moved so they no longer overlap.
-   * The displacement is **distributed symmetrically around their initial anchor positions**:
-
-     * For two blocks: one nudged slightly up, the other slightly down.
-     * For more than two: they’re spaced out vertically around the anchor area.
-   * Connector lines remain intact and point from each block to its source selection.
-
-3. Expansion:
-
-   * A collapsed block can be **manually expanded** by the user (e.g., click on header).
-   * Expanding one block may:
-
-     * Push nearby blocks further to make room, or
-     * Temporarily collapse them, depending on available space.
-   * In expanded state, all messages and the linear input area are visible again.
-
+  * Switches the active branch to the branch that ends at that highlight’s child node (no further nodes/columns are displayed after it). If there was a column on the right from the one containing this highlight, it gets hidden. Instead of it the highlight's child node/column is shown.
+  * Doesn't change the other columns.
+  * The clicked highlight becomes active (bright).
+* Clicking an active highlight (if multiple branches exist from the same selection or a few highlights intersect at the clicked character) shows a small chooser to pick one branch.
 
 ---
 
-## 7. Session header & dropdown
+## 6. Session header & top bar
 
-* Every chat block has a header, but the first/root chat block’s header is special:
+The top bar:
 
-  * It becomes the session name.
-  * The session title is always kept identical to the root chat block’s header. Whenever the root header is set or updated, the session title is set to the same value; the two never diverge.
+* Lucide **square-menu** icon button.
+* App name label.
 
-* A floating button in the top-left corner of the viewport opens a dropdown menu:
+The **square-menu button**:
 
-  * The dropdown displays the current session’s name, which is derived directly from the root block’s header.
-  * It can later be extended to list other sessions or conversation metadata (not required to implement the branching logic itself).
+* Opens a **dropdown menu** listing all sessions:
 
-* There’s the app name to the right of the button.
+  * Each item displays:
 
----
+    * The session name (root node header).
+    * Lucide **trash-2** button to delete the session.
+  * The **current session** is clearly highlighted.
+* Clicking a session in the dropdown:
 
-## 8. Behavioral summary
+  * Switches the activeSessionId in the data model.
+  * Loads the tree for that session.
+  * Reconstructs and renders the active branch for that session (typically from root to last focused node).
 
-Putting it all together:
+Session titles:
 
-1. The user starts a new session:
+* Each session uses the root node’s header as its **session title**.
+* The **root column header and the session title are always identical**:
 
-    * A first chat block appears in column 0 with an empty linear input.
-    * They type a prompt and send it. The text is treated as the new user input for that block and sent to the LLM.
-    * Once the LLM responds, the prompt and reply appear together in the block as a right-aligned soft-blue user message followed by a left-aligned assistant message, and a new linear input appears below the reply for the next turn.
-
-2. They continue linearly in that block as in a normal chat.
-
-3. At any time, they can select specific text in any message:
-
-   * A branch input appears above the selection.
-   * They type a question and send it.
-   * A new chat block appears in the column to the right, vertically aligned to the selection, with a connector line linking them.
-
-4. That new chat block behaves like a normal chat: linear input, multiple turns, etc.
-
-5. If multiple chat blocks in a column are created near each other:
-
-   * They are collapsed and repositioned to avoid overlap, and can be expanded on demand.
-
-6. The user navigates between columns via floating left/right arrows (desktop) or horizontal swipe (mobile).
-   One column is always centered and considered current.
-
-7. The header of the first chat block is AI-generated and used as the session name, visible in a dropdown from the floating button in the top-left.
+  * When the LLM proposes a header for the root node, the session title is set to exactly that string.
 
 ---
 
-## 9. Data model and identifiers
+## 7. Behavioral summary
 
-The app treats everything as JSON objects in memory that can be serialized into browser storage and sent to the LLM.
+1. User opens the app.
+2. A **new session** is available or loaded; the root column appears on the left with:
 
-### 9.1 Session
+   * Placeholder text and arrow-down icon.
+   * “Ask anything” input at the bottom.
+3. User types into the root’s linear input and sends:
 
-Each conversation session is represented as a single JSON object containing:
+   * Placeholder disappears.
+   * The root column shows the user message and then the LLM reply.
+   * The root header is generated by the LLM and becomes the session title.
+4. User continues linearly in any visible column via its (active) linear input.
+5. At any time, the user can select text in any message:
 
-* A unique session id, for example `"session_123"`.
-* A human-readable session title, which is the header of the root chat block, for example `"Clarifying matrix multiplication"`.
-* A reference to the root chat block id, for example `"block_root"`.
-* A collection of all chat blocks in this session.
-* Optional metadata such as creation time and last updated time.
+   * A context input appears above the selection.
+   * Sending from it creates a child column to the right.
+   * The selected text becomes a highlight.
+6. The active branch is the sequence of columns from root to the last displayed column; only these columns are visible.
+7. Previously created branches are represented by **pale highlights**:
 
-Conceptually, a minimal session object looks like this:
+   * Clicking them switches back to those branches and shows one column they lead to but none of the further columns.
+8. Each column’s vertical scroll is independent; horizontal scroll is available for the whole branch.
+9. Columns that move completely out of view are represented by vertical edge bars at the viewport edges with vertically displayed header text; clicking a bar scrolls that column back into view.
 
-{ "id": "session_123", "title": "Clarifying matrix multiplication", "rootBlockId": "block_root", "blocks": { ... }, "createdAt": "ISO timestamp", "updatedAt": "ISO timestamp" }
+---
 
-The `blocks` field contains all chat blocks by id, not grouped by columns. Columns are derived from each block’s depth.
+## 8. Data model and identifiers
 
-### 9.2 Chat block
+All persistent state is represented as JSON that can be:
 
-Each chat block is represented as a JSON object keyed by its id inside session.blocks. It contains:
+* Stored in browser storage.
+* Sent to the LLM as context.
+* Used to reconstruct UI purely from data.
 
-* A unique block id, for example "block_7".
-* A depth integer (0 for the root column, 1 for the first branch column, etc.).
-* The AI-generated header string for that block, or null if the header has not yet been set.
-* A messages array (linear history of user and LLM messages in this block).
-* A source object describing where this block branched from (or null for the root).
-* UI-related flags such as collapsed (true/false).
+### 8.1 Session
 
-A typical chat block shape:
+A session object contains:
+
+* `"id"`: unique session id.
+* `"title"`: session title (always equal to root node header).
+* `"rootNodeId"`: id of the root node.
+* `"nodes"`: map of node ids → node objects.
+* `"createdAt"` / `"updatedAt"`: timestamps.
+
+Example shape (conceptual):
+
+{ "id": "session_123", "title": "Intro to matrix multiplication", "rootNodeId": "node_root", "nodes": { ... }, "createdAt": "ISO timestamp", "updatedAt": "ISO timestamp" }
+
+### 8.2 Node / column
+
+Each node represents exactly one column and contains:
+
+* `"id"`: node id.
+* `"depth"`: integer, 0 for root, 1 for its children, etc.
+* `"header"`: AI-generated title string (or null before set).
+* `"parent"`: either null (for root) or an object describing where this node branched from:
+
+  * `"parentNodeId"`: id of the parent node.
+  * `"parentMessageId"`: id of the message containing the selection.
+  * `"selection"`:
+
+    * `"text"`: the selected text.
+    * `"startOffset"` / `"endOffset"`: character offsets within the parent message text.
+* `"messages"`: array of message objects (see §8.3), in chronological order.
+* Optional `"children"`: list of child node ids for convenience (can be derived but may be stored for fast traversal).
+
+Conceptual example:
 
 {
-"id": "block_7",
+"id": "node_7",
 "depth": 2,
-"header": "Concrete example of clause X",
-"source": {
-"parentBlockId": "block_3",
+"header": "Concrete example for clause X",
+"parent": {
+"parentNodeId": "node_3",
 "parentMessageId": "msg_18",
 "selection": {
-"text": "string of highlighted text",
+"text": "the clause describing termination",
 "startOffset": 120,
 "endOffset": 180
 }
 },
-"messages": [ ... ],
-"collapsed": false
+"messages": [ ... ]
 }
 
-The source object allows the UI to reconstruct connector lines and vertical alignment without storing actual pixel positions. The layout engine uses parentBlockId, parentMessageId, and the selection information to compute the anchor point; the full content of the parent message is read from the parent block’s messages array when needed.
+The root node has `"parent": null` and `"depth": 0`.
 
-The root chat block has source set to null and depth set to 0.
+### 8.3 Message
 
-### 9.3 Message
+Messages are stored in `node.messages` as plain JSON objects:
 
-Each message inside a chat block is represented as a JSON object with:
+* `"id"`: unique within the session (e.g., "msg_5").
+* `"role"`: `"user"` or `"assistant"`.
+* `"text"`: message content.
+* `"createdAt"`: timestamp.
+* `"highlights"`: array of highlight link objects (see §8.4) for selections in this message that have branches.
 
-* A unique message id within the session, for example `"msg_5"`.
-* A `role` field: `"user"` or `"assistant"`.
-* The `text` content of the message.
-* Timestamps and optional metadata such as streaming status or error flags.
+Conceptual example:
 
-A message object looks like:
+{ "id": "msg_5", "role": "user", "text": "What happens if the matrix is singular?", "createdAt": "ISO timestamp", "highlights": [ ... ] }
 
-{ "id": "msg_5", "role": "user", "text": "What happens if the matrix is singular?", "createdAt": "ISO timestamp" }
+Messages in each node are append-only: new messages are appended to the end in send order.
 
-Messages are stored in chronological order in `block.messages`:
+### 8.4 Highlights and branch links
 
-[
-{ "id": "msg_1", "role": "user", ... },
-{ "id": "msg_2", "role": "assistant", ... },
-{ "id": "msg_3", "role": "user", ... },
-...
-]
+Highlights do not exist as separate top-level entities; they are stored on the **message** level.
 
-This is an append-only log inside each block: new user messages and new assistant messages are always appended at the end.
+Each highlight entry in `message.highlights` includes:
 
-System/UI-only elements such as loading indicators or transient error messages are not stored as messages; they are rendered purely from ephemeral UI state.
+* `"highlightId"`: unique id for the highlight.
+* `"startOffset"` / `"endOffset"`: character offsets in `message.text`.
+* `"text"`: the exact substring.
+* `"childNodeId"`: id of the node that this highlight leads to (one child per highlight for the base spec).
+* `"isActive"`: optional UI flag indicating whether this highlight’s child node lies on the **current active branch**.
 
-### 9.4 Selection and branching links
+Conceptual example:
 
-Selections themselves are not stored as separate top-level objects. Instead, when a branch is created:
+{
+"highlightId": "hl_9",
+"startOffset": 120,
+"endOffset": 180,
+"text": "the clause describing termination",
+"childNodeId": "node_7",
+"isActive": true
+}
 
-* The app records a transient selection (message id + character range + selected text).
-* When the branch is actually created (user sends branch prompt), this information is copied into the new block’s `source` field.
+This allows the UI to:
 
-The `source` object therefore permanently links:
+* Render the highlight with different tint depending on isActive.
+* Navigate to the child node on click (switching the active branch).
 
-* The new block id.
-* The parent block and parent message id.
-* The exact selected text.
-* The full content of the parent message where the selection was made.
+### 8.5 Active branch and UI state
 
-This makes it possible to reconstruct the tree structure and the context of each branch purely from JSON, without needing UI-specific state.
+The **active branch** and lightweight UI state are stored separately from sessions:
 
-### 9.5 Column derivation
+* `"version"`: numeric schema version.
+* `"activeSessionId"`: id of the current session.
+* `"activeBranchNodeIds"`: ordered array of node ids forming the currently visible path from root to the current node.
+* `"currentNodeId"`: id of the current/focused node (usually the last element of activeBranchNodeIds).
 
-Columns are not stored as separate entities. Instead:
+Optional UI state:
 
-* The `depth` number on each block determines which column it belongs to.
-* All blocks with `depth = 0` are in the leftmost column, with `depth = 1` in the next column, and so on.
+* `"lastFocusedNodeId"`: latest focused node in this session.
+* Per-session last focused nodes if needed.
 
-Within a column, the vertical ordering is a rendering concern:
-
-* The layout engine can compute an initial vertical anchor based on the parent selection height.
-* Overlap resolution and the “too close → collapse” logic rely on run-time layout, not stored data.
-
-Optionally, the app may store a rough `anchorOrder` integer per block for more stable vertical ordering across reloads, for example:
-
-{ "anchorOrder": 3 }
-
-This value only encodes relative order (1st, 2nd, …) in that column rather than pixel positions.
-
-### 9.6 UI state vs persistent state
-
-Some state is ephemeral and not stored in persistent JSON:
-
-* Current text in the linear input field.
-* Current text in a branch input field.
-* Currently selected text range in the UI before a branch is created.
-* Scroll positions and focus.
-
-Some UI state is useful to persist:
-
-* Whether a block is collapsed or expanded: `collapsed: true` or `false`.
-* The id of the currently active session.
-* Optionally the id of the currently focused block or column.
-
-A top-level app state JSON may therefore look like:
+Top-level state example:
 
 {
 "version": 1,
 "activeSessionId": "session_123",
+"activeBranchNodeIds": ["node_root", "node_3", "node_7"],
+"currentNodeId": "node_7",
 "sessions": {
-"session_123": { ... },
-"session_456": { ... }
-},
-"ui": {
-"lastFocusedBlockId": "block_7"
+"session_123": { ... }
 }
 }
 
-Only this JSON is written to browser storage; everything else (inputs, temporary selections) lives just in memory.
+### 8.6 Persistent vs ephemeral state
+
+**Persistent state** (stored in browser storage):
+
+* Entire `sessions` map.
+* `activeSessionId`.
+* `activeBranchNodeIds`.
+* `currentNodeId`.
+* Node headers, messages, parent links, highlights, timestamps.
+
+**Ephemeral state** (in memory only):
+
+* Current text in any linear input.
+* Current text in a context input field.
+* Current raw text selection before a branch is created.
+* Loading / error indicators.
+* Scroll positions for columns.
+* Hover states and other transient UI flags.
 
 ---
 
-## 10. Local browser storage
+## 9. Local browser storage
 
-All persistent state is stored as a single JSON document in local browser storage (for example under a key such as `"branching_chat_state"`).
+All persistent state is stored under a **single key** in browser storage, for example `"branching_chat_state"`.
 
-### 10.1 Initial load
+### 9.1 Initial load
 
 On app startup:
 
-1. The app reads the JSON string from browser storage.
-2. If nothing is stored, it initializes an empty state such as:
-   { "version": 1, "activeSessionId": null, "sessions": {} }.
-3. If parsing fails or the structure is invalid, the app falls back to this empty state and may keep a copy of the broken data under a separate key for manual recovery if needed.
+1. The app attempts to read and parse the JSON snapshot from storage.
+2. If nothing is stored:
 
-### 10.2 Saving on changes
+   * Initialize with an empty state such as:
+     { "version": 1, "activeSessionId": null, "sessions": {}, "activeBranchNodeIds": [], "currentNodeId": null }.
+3. If parsing fails or structure is invalid:
 
-Whenever a meaningful change is made, the in-memory JSON state is updated and then serialized back into browser storage. Meaningful changes include:
+   * Fallback to the same empty state.
+   * Optionally keep the corrupted payload under a separate key for manual recovery.
 
-* Creating a new session and its root block.
-* Adding a new user message.
-* Storing a new assistant message from the LLM.
-* Creating a new branch (new block with `source`).
-* Updating a block’s header.
-* Toggling a block’s `collapsed` flag.
-* Changing the session title.
-* Switching the active session.
+### 9.2 Saving updates
 
-To keep the implementation simple but not wasteful, the app can:
+Whenever a **meaningful change** happens, the in-memory state is updated and then serialized back into storage. Changes include:
 
-* Update the in-memory JSON immediately.
-* Schedule a single write to browser storage after a short delay (for example, a few hundred milliseconds), coalescing multiple rapid changes into one write.
+* Creating a new session and its root node.
+* Adding user or assistant messages to a node.
+* Creating a new node via context branching.
+* Updating node headers.
+* Updating highlight active states.
+* Changing activeSessionId, activeBranchNodeIds or currentNodeId.
 
-From the data perspective, this means browser storage always contains the latest known consistent snapshot of:
+To avoid excessive writes:
 
-{ "version": 1, "activeSessionId": "...", "sessions": { ... }, "ui": { ... } }
+* Writes can be debounced:
 
-### 10.3 Session lifecycle
+  * After each state change, schedule a write a few hundred milliseconds later.
+  * If more changes happen before the timer fires, they are coalesced into a single write.
 
-When a new session is created (for example, when the user clicks “New chat” or otherwise starts a new conversation), the app proactively creates its data structures before the first message is sent:
+The stored snapshot always contains a fully consistent representation of:
 
-* A new session object is added to state.sessions.
-* A root block with depth: 0 and source: null is created and attached to it.
-* activeSessionId is updated to point to the new session.
-* The state is persisted.
+{ "version": 1, "activeSessionId": "...", "activeBranchNodeIds": [...], "currentNodeId": "...", "sessions": { ... } }
 
-When a user later sends the first prompt in that session, it is handled as described in §§11–12 using this already-existing root block.
+### 9.3 Session lifecycle
 
-When sessions are closed or deleted (if supported):
+Creating a new session:
 
-* The corresponding session entry is removed from state.sessions.
-* If the deleted session was active, activeSessionId is reset or switched to another session.
-* The state is persisted.
+1. Generate a new session id.
+2. Create a root node with:
 
-### 10.4 Versioning
+   * depth = 0,
+   * parent = null,
+   * empty messages array,
+   * null header initially.
+3. Create a session object with:
 
-The top-level JSON includes a simple numeric `version` field. If future changes require migrations, the app can:
+   * rootNodeId = root node id.
+   * title = null (until header is set).
+4. Set activeSessionId to the new session id.
+5. Set activeBranchNodeIds to `[rootNodeId]` and currentNodeId to rootNodeId.
+6. Persist the state.
 
-* Read `version`.
-* Transform the stored data into the current shape.
-* Save back with the new `version`.
+Deleting or closing sessions:
 
-The current description assumes `version = 1` as the initial format.
+* Remove the session entry from `sessions`.
+* If the deleted session was active:
+
+  * Clear activeBranchNodeIds and currentNodeId or switch to another session.
+* Persist the updated state.
+
+### 9.4 Versioning
+
+A top-level `"version"` field enables migrations:
+
+* On load, the app checks the version.
+* If it is older than the code’s current schema, apply data transformations.
+* Save the transformed state back with the new version.
 
 ---
 
-## 11. LLM interaction model
+## 10. LLM payload and minimal storage
 
-All interactions with the LLM (OpenAI API) use a single, universal JSON structure that can handle:
+### 10.1 State used for LLM and storage
 
-* Normal chat replies inside any chat block.
-* Generation of AI headers for chat blocks.
-* Generation of the root block header that becomes the session title.
+For each session:
 
-The OpenAI Chat Completions API is used with:
+* The **full tree** is stored as described in §8 (sessions, nodes, messages, highlights).
+* Additionally, the **current branch** (visible columns) is stored as an ordered list of node ids from root to the last opened node:
 
-* A system message that explains the app’s expectations.
-* A single user message whose content is a JSON object describing the current request.
-
-### 11.1 Universal request JSON
-
-The content of the user message is always a JSON object containing at least:
-
-* `"request_type"`: for example `"chat_block_turn"`.
-* `"session"`: minimal session info relevant to the current request.
-* `"branch_path"`: full context of the current branch from root to the current block.
-* `"current_user_input"`: the text the human just typed.
-* `"options"`: optional flags and parameters, extendable over time.
-
-The options field is an extensible object for additional flags and parameters, for example:
-
-* should_suggest_block_header: whether the model should propose or refine a short header for the current block.
-* should_suggest_session_title: a hint that, for the root block, the suggested block header will also be used as the session title, so it should be especially concise and descriptive.
-* language: preferred natural language for the assistant_message and headers.
-
-These flags influence how the model chooses block_header, but the app still enforces that the session title is always identical to the root block’s header.
-
-
-A typical request payload looks like:
-
+```json
 {
-"request_type": "chat_block_turn",
-"session": {
-"id": "session_123",
-"title": "Clarifying matrix multiplication"
-},
-"branch_path": [ ... ],
-"current_user_input": "user prompt string",
-"options": {
-"should_suggest_block_header": true,
-"should_suggest_session_title": true or false,
-"language": "en"
+  "activeSessionId": "session_123",
+  "activeBranchNodeIds": ["node_root", "node_3", "node_7"]
 }
-}
+```
 
-The `branch_path` gives the LLM the full context of the branch.
+* The **last id** in `activeBranchNodeIds` is the current node for sending prompts.
+* Scroll positions, which column is visually focused, and any hover/selection state are **never stored**; they live only in memory.
 
-### 11.2 Branch path context
+Only data needed to rebuild the branch and send minimal LLM payloads is persisted.
 
-The branch_path array is ordered from the root block down to the current block. Each element represents one block along the path and contains:
+---
 
-* The block id.
-* The block header (if already known).
-* The full linear message history inside that block up to, but not including, the new user input that triggered this request.
-* For non-root blocks, a source object describing how this block branched from its parent.
+### 10.2 Building a minimal LLM request
 
-Each element in branch_path therefore has a structure like:
+For any turn (linear or branched), the LLM receives only:
 
+* The **conversation history** along the current branch, as plain text.
+* The **current prompt**.
+
+No ids, timestamps, depths, or other metadata are sent.
+
+1. Take `activeBranchNodeIds` for the current session.
+
+2. For each node on this branch, in order from root to current:
+
+   * Append its messages in chronological order as `{ role, text }`.
+   * For every node after the root, insert a short **branch note** right before its first message, derived from the `parent.selection.text` of that node:
+
+     *Example branch note text:*
+     `[Branch created from previous text: "the clause describing termination"]`
+
+3. The last user input (from the linear or context input) is sent separately as `prompt`.
+
+Resulting request shape:
+
+```json
 {
-"block_id": "block_3",
-"header": "Clarifying step 2",
-"source": {
-"parentBlockId": "block_root",
-"parentMessageId": "msg_7",
-"selection": {
-"text": "selected snippet",
-"startOffset": 50,
-"endOffset": 120
+  "history": [
+    {
+      "role": "user",
+      "text": "Explain matrix multiplication in simple terms."
+    },
+    {
+      "role": "assistant",
+      "text": "Matrix multiplication combines rows and columns..."
+    },
+    {
+      "role": "user",
+      "text": "[Branch created from previous text: \"the clause describing termination\"]"
+    },
+    {
+      "role": "user",
+      "text": "Can you give a concrete example of that termination clause?"
+    },
+    {
+      "role": "assistant",
+      "text": "Sure, imagine a contract that ends when..."
+    }
+  ],
+  "prompt": "Rewrite that example so a beginner lawyer can understand it."
 }
-},
-"messages": [
-{ "role": "user", "text": "..." },
-{ "role": "assistant", "text": "..." },
-...
-]
-}
+```
 
-For the root block element:
+All highlight/branch information that matters to the LLM is encoded in these branch note lines; no separate highlight objects, node ids, or selection offsets are sent.
 
-* source is null.
-* depth is implicitly 0 and does not need to be sent if the model does not need it.
+---
 
-The last element in branch_path corresponds to the chat block the LLM is currently replying inside. Its messages array contains all previous turns in that block, but never the new user input that is currently being sent; that input is provided only in current_user_input.
+### 10.3 LLM response and state update
 
-Because the parent messages are included in the messages arrays of the appropriate blocks, the LLM sees both the exact snippet that was selected (via selection) and the full parent message text that snippet came from, without needing a separate fullParentMessageText field.
+The LLM responds with a single JSON object:
 
-The LLM therefore sees:
-
-* All parent blocks and how they relate via selections.
-* The exact text that was highlighted at each branching step and its character offsets.
-* The full messages containing each snippet in the parent blocks.
-* All messages in the current block up to the point where the new user input is sent.
-
-This satisfies the requirement that the LLM “gets the full context of the branch.”
-
-The messages objects included in branch_path are a simplified view of the internal messages (role and text only); ids and timestamps are kept in the client state but are not sent to the LLM.
-
-### 11.3 Root block: first reply
-
-When the very first message in a new session is sent:
-
-* A new session and root block are created.
-* The root block’s messages array is initially empty.
-* The branch_path contains a single element describing this root block, with a messages array containing all previously committed messages (typically none on the first turn).
-* current_user_input is set to the text the user just typed.
-* options.should_suggest_block_header is set to true.
-* options.should_suggest_session_title is set to true as well, because the root block header will become the session title.
-
-Example request:
-
+```json
 {
-"request_type": "chat_block_turn",
-"session": {
-"id": "session_999",
-"title": null
-},
-"branch_path": [
-{
-"block_id": "block_root",
-"header": null,
-"source": null,
-"messages": []
+  "header": "Beginner-friendly termination clause example",
+  "message": "Here is a simple explanation in **markdown**..."
 }
-],
-"current_user_input": "Explain matrix multiplication in simple terms.",
-"options": {
-"should_suggest_block_header": true,
-"should_suggest_session_title": true
-}
-}
+```
 
-### 11.4 Continuing a chat block
+* `header`: short title for the current node.
+* `message`: full reply in markdown, to be stored as an assistant message and rendered as such.
 
-When adding another message to an existing chat block (no new branch):
+On successful response:
 
-* The block already has a non-null header.
-* The user types a prompt in the linear input for that block and presses send.
-* For this request:
-
-  * The block’s existing messages array is treated as the history before the new turn.
-  * branch_path is built by walking from the root block to the current block via source.parentBlockId, including the full messages arrays for each block up to but not including the new user input.
-  * current_user_input is set to the text the user just typed.
-  * options.should_suggest_session_title can be false (no need to rename the session).
-  * options.should_suggest_block_header can be true if header suggestions are still desired, or false if the header should remain stable.
-
-When the LLM response arrives, the app appends two messages to the current block’s messages array in order:
-
-1. A user message containing the text from current_user_input.
-2. An assistant message containing the assistant_message text.
-
-The header is only updated if the block currently has no header or if the UI explicitly allows header refresh.
-
-### 11.5 Creating a branch
-
-When the user selects text and sends a branch prompt:
-
-1. The app records the selection: parent block id, parent message id, selected text and offsets.
-2. A new block object is created with the appropriate depth, and its source field is filled with this selection information.
-3. For the purposes of the LLM request, this new block initially has an empty messages array.
-4. branch_path is built from the root block all the way to this new block:
-
-   * For each ancestor block (including the parent), messages contains the full message history in that block up to this point.
-   * The new block appears as the last element in branch_path with an empty messages array and the appropriate source.
-5. current_user_input is set to the branch prompt text that the user typed in the branch input.
-
-The LLM therefore knows:
-
-* The overall conversation that led to the parent block.
-* The exact text that was highlighted (via selection) and its character offsets.
-* The full message where the highlight lives (from the parent block’s messages).
-* The prompt used to start the new branch (current_user_input).
-
-When the response arrives, the app appends two messages to the new block’s messages array:
-
-1. A user message containing the branch prompt text (current_user_input).
-2. An assistant message containing the assistant_message text.
-
-It then sets the new block’s header from block_header.
-
-### 11.6 LLM response JSON
-
-The LLM is instructed (via the system message) to always respond with a single JSON object containing at least:
-
-* "assistant_message": the text that should be displayed as the assistant’s reply in the current block.
-* "block_header": an optional short header summarizing the block’s topic.
-* "session_title": an optional session title suggestion. For the root block, if this field is present it must be identical to block_header; the app treats the root block’s header as the single source of truth and always keeps the session title equal to that header.
-* "notes": an optional diagnostic or explanation field that is ignored by the UI.
-
-A typical response:
-
-{
-"assistant_message": "Explanation of the concept...",
-"block_header": "Intuitive explanation of matrix multiplication",
-"session_title": null,
-"notes": "short internal comment or can be null"
-}
-
-On receiving this JSON:
-
-1. The app appends an assistant message to the current block’s messages array using the value of assistant_message, after first appending a user message based on current_user_input as described in §§11.3–11.5.
-2. If block_header is non-empty and the block currently has no header, the block’s header field is set to this value. If the block already has a header and header refresh is not enabled, block_header is ignored.
-3. If the block is the root block and block_header is non-empty, the session’s title is always set to exactly the same value as the root block’s header. Any separate session_title value in the response is either null or identical to block_header; the app never allows the session title to diverge from the root header.
-
-This makes header generation part of the normal reply path and avoids separate special-purpose calls while enforcing that the root header and session title are always the same.
-
-### 11.7 Error handling
-
-If the LLM request fails (network error, parsing error, invalid JSON, etc.):
-
-* A synthetic message may be added to the block with `role: "assistant"` and a short error explanation, for example `"text": "Something went wrong. Please try again."`, or the error can be surfaced via a non-persistent UI element.
-* The failed attempt is not persisted as a real assistant message unless explicitly desired.
-* The user can retry; the same `branch_path` and `current_user_input` are used to build a new request.
-
-If the LLM returns JSON that cannot be parsed:
-
-* The raw text is stored in a special error field in the app state for debugging (optional).
-* A user-facing error is displayed.
-* No new assistant message is appended until a valid structure is received.
+1. The user message with the current `prompt` is already present in the current node’s `messages` (it was added immediately when the user sent it).
+2. It appends an assistant message with `role: "assistant"` and `text: message` to the current node’s `messages`.
+3. If the node’s `header` is null, it is set to `header`.
+   *If this is the root node, the session title is also set to the same string (§6).*
+4. The updated session, nodes, messages and `activeBranchNodeIds` are written back to browser storage (debounced as in §9.2).
 
 ---
 
-## 12. Data flow for common actions
+## 11. Data flow for common actions
 
-### 12.1 Sending a prompt in the root block
+### 11.1 Sending the first prompt in a session
 
-1. The user starts a new session, which creates a session object and a root block (see §10.3). A first chat block appears in column 0 with an empty linear input.
+1. User
 
-2. The user types a prompt in the root block’s linear input and presses send.
+   * Focuses the root column’s linear input.
+   * Types a prompt and sends it.
 
-3. The app:
+2. App
 
-   * Uses the root block’s current messages array as the history (typically empty for the very first turn).
-   * Builds branch_path with only the root block, including its existing messages.
-   * Sets current_user_input to the text the user just typed.
-   * Sends the universal JSON request to the LLM.
+   * `activeBranchNodeIds = ["node_root"]`, `currentNodeId = "node_root"`.
+   * Builds the LLM request:
 
-4. When the response JSON arrives, the app:
+     * `history`: all messages along the active branch (none yet for a brand-new session).
+     * `prompt`: the typed text.
+   * Sends:
 
-   * Appends a user message to rootBlock.messages containing the text from current_user_input.
-   * Appends an assistant message containing assistant_message.
-   * Sets the block header from block_header if provided.
-   * Sets the session title to exactly the same value as the root block’s header.
-   * Writes the updated session into browser storage.
+     ```json
+     {
+       "history": [],
+       "prompt": "Explain matrix multiplication in simple terms."
+     }
+     ```
 
-### 12.2 Sending a prompt in any existing block
+3. On LLM response
 
-1. The user types in the block’s linear input and presses send.
+   * Receives:
 
-2. The app:
+     ```json
+     {
+       "header": "Intro to matrix multiplication",
+       "message": "Matrix multiplication combines rows and columns..."
+     }
+     ```
 
-   * Takes that block’s existing messages array as the history.
-   * Builds branch_path from the root block to this block via source.parentBlockId, including the full messages arrays for each block.
-   * Sets current_user_input to the text the user just typed.
-   * Sends the universal JSON request.
+   * The user message was appended to the root node’s `messages` when it was sent; on response, only the assistant message is appended:
 
-3. When the response arrives, the app:
+     ```json
+     { "id": "msg_2", "role": "assistant", "text": "Matrix multiplication combines rows and columns..." }
+     ```
 
-   * Appends a user message to that block’s messages containing current_user_input.
-   * Appends an assistant message containing assistant_message.
-   * Updates header only if the block currently has no header or if the UI explicitly allows header refresh.
-   * Persists the state to browser storage.
+   * Sets the root node’s `header = "Intro to matrix multiplication"`.
 
-### 12.3 Creating a branch
+   * Sets `session.title` to the same string.
 
-1. The user selects text in a message in block A.
-
-2. A branch input appears above the selection.
-
-3. The user types a branch prompt and sends it.
-
-4. The app:
-
-   * Creates a new block B with depth = depth(A) + 1.
-   * Fills block B’s source with parent block id, parent message id, and selection text and offsets.
-   * Builds branch_path from the root block through A and finally to B:
-
-     * For all existing blocks along the path (including A), branch_path contains their full messages arrays.
-     * For the new block B, branch_path includes an element with an empty messages array and the appropriate source.
-   * Sets current_user_input to the branch prompt text.
-   * Sends the universal JSON request.
-
-5. When the response arrives, the app:
-
-   * Appends a user message with the branch prompt to block B’s messages.
-   * Appends an assistant message containing assistant_message to block B’s messages.
-   * Sets B’s header based on block_header.
-   * Persists the updated session.
+   * Updates timestamps and persists state (sessions, nodes, `activeBranchNodeIds`, `currentNodeId`).
 
 ---
 
-## 13. Simplicity and extensibility
+### 11.2 Continuing in the current column
 
-To keep the implementation simple without sacrificing correctness:
+1. User
 
-* There is a single canonical JSON structure in memory, mirroring what is stored in browser storage.
-* All structural entities (sessions, blocks, messages, branch sources) are plain JSON objects.
-* Columns are derived from `depth` instead of stored as a separate layer of data.
-* Every LLM call uses the same universal request JSON shape and expects the same universal response JSON shape.
-* The branch context is explicit and self-contained: for any LLM call, the LLM can reconstruct the entire path from the root block down to the current block, including all parent messages and selections.
+   * Types into the linear input field of the current node (last id in `activeBranchNodeIds`) and sends.
 
-At the same time, the structure is flexible:
+2. App
 
-* New fields can be added to `options`, `messages`, `blocks`, or `sessions` without breaking existing logic.
-* If context window becomes a concern, the `branch_path` structure can be extended later to include summaries or truncated histories, while preserving the same overall shape.
-* Additional features such as suggested follow-up questions, tags, or annotations can be added via extra fields in the LLM response JSON (for example `"suggested_questions": [ ... ]`) and stored alongside existing data.
+   * `currentNodeId` is the node being continued.
 
-This data model and request/response flow ensure that:
+   * Builds `history` from `activeBranchNodeIds` in order:
 
-* The UI behavior described in the spec (columns, blocks, branching, collapse/expand, and headers) can be fully reconstructed from JSON.
-* The LLM always receives the full relevant context of a branch: what it is replying to, how that content was selected, and all parent blocks and messages along the way.
+     * For each node on the branch:
 
----
+       * Appends all its existing messages as `{ role, text }`.
+       * For non-root nodes, just before their first message, appends a branch note line derived from `parent.selection.text`, for example:
 
-## 14. Technology stack
+         ```json
+         {
+           "role": "user",
+           "text": "[Branch created from previous text: \"the clause describing termination\"]"
+         }
+         ```
 
-The app is implemented as a client-heavy Next.js application with a very small server surface for LLM calls. All persistent conversation data lives in the browser.
+   * Sets `prompt` to the new input text.
 
----
+   * Sends:
 
-### 14.1 Framework and language
+     ```json
+     {
+       "history": [ { "role": "user", "text": "..." }, { "role": "assistant", "text": "..." }, ... ],
+       "prompt": "Follow-up question here..."
+     }
+     ```
 
-* Next.js with the App Router and TypeScript is used as the main framework.
-* React is used for all interactive UI:
+3. On LLM response
 
-  * Column layout.
-  * Chat blocks and messages.
-  * Branching UI, selection handling, collapse/expand controls.
-* The initial page shell (layout, basic HTML) is rendered by Next.js.
-  All conversation state is managed on the client and hydrated from browser storage.
+   * Receives:
 
----
+     ```json
+     {
+       "header": "Refined explanation of X",
+       "message": "Here is a clearer explanation in markdown..."
+     }
+     ```
 
-### 14.2 Styling and UI components
+   * The user message was appended to the current node’s `messages` when it was sent; on response, only the assistant message is appended:
 
-* Tailwind CSS is used for layout and visual design:
+     ```json
+     { "id": "msg_n+1", "role": "assistant", "text": "Here is a clearer explanation in markdown..." }
+     ```
 
-  * Horizontal columns, vertical stacking of blocks.
-  * Message bubbles (right-aligned user, left-aligned assistant).
-  * Card-like containers for chat blocks, floating controls, dropdowns.
-* A small headless or utility-first component set is used for primitives such as:
+   * If the node’s `header` is null, sets it to `"Refined explanation of X"`; otherwise keeps the existing header.
 
-  * Buttons, cards, dropdown menu for the session name, modals if needed.
-* Lucide icons are used for:
-
-  * Left/right navigation arrows.
-  * Branch indicators.
-  * Collapse/expand icons and other small affordances.
+   * Persists updated state.
 
 ---
 
-### 14.3 Client state and browser persistence
+### 11.3 Creating a branch via context input
 
-* A single global state store holds the entire JSON data model:
+1. User
 
-  * All sessions, chat blocks, messages and branching links.
-  * The id of the active session.
-  * Lightweight UI state such as which block is collapsed or focused.
-* The store can be implemented with:
+   * Selects text in a message in node **P**.
+   * Context input appears above the selection.
+   * Types a context question and sends.
 
-  * React context plus a reducer, or
-  * A small state library such as Zustand.
+2. App
+
+   * Captures the selection:
+
+     * `parentNodeId = P.id`.
+     * `parentMessageId =` id of the message containing the selection.
+     * `selection = { text, startOffset, endOffset }`.
+
+   * Creates a new node **C**:
+
+     ```json
+     {
+       "id": "node_C",
+       "depth": P.depth + 1,
+       "header": null,
+       "parent": {
+         "parentNodeId": "node_P",
+         "parentMessageId": "msg_18",
+         "selection": {
+           "text": "the clause describing termination",
+           "startOffset": 120,
+           "endOffset": 180
+         }
+       },
+       "messages": []
+     }
+     ```
+
+   * Adds a highlight entry to the parent message pointing to `childNodeId = "node_C"`.
+
+   * Updates branch state:
+
+     * Takes the prefix of `activeBranchNodeIds` up to and including `P.id`.
+     * Sets `activeBranchNodeIds = [ ..., "node_P", "node_C" ]`.
+     * Sets `currentNodeId = "node_C"`.
+
+   * Builds `history` for the **new** active branch using the same rules as in 11.2:
+
+     * All messages from root to P.
+     * A branch note for C based on `selection.text`, e.g.:
+
+       ```json
+       {
+         "role": "user",
+         "text": "[Branch created from previous text: \"the clause describing termination\"]"
+       }
+       ```
+
+   * Sets `prompt` to the context question.
+
+   * Sends:
+
+     ```json
+     {
+       "history": [ ... ],
+       "prompt": "Can you give a concrete example of that termination clause?"
+     }
+     ```
+
+3. On LLM response
+
+   * Receives:
+
+     ```json
+     {
+       "header": "Concrete termination clause example",
+       "message": "Here is a concrete example in **markdown**..."
+     }
+     ```
+
+   * The user message was appended to node C’s `messages` when it was sent; on response, only the assistant message is appended:
+
+     ```json
+     { "id": "msg_k+1", "role": "assistant", "text": "Here is a concrete example in **markdown**..." }
+     ```
+
+   * Sets `node_C.header = "Concrete termination clause example"`.
+
+   * Persists updated `sessions`, `activeBranchNodeIds`, `currentNodeId`.
+
+---
+
+### 11.4 Switching branches via highlight
+
+1. User
+
+   * Clicks a pale (inactive) highlight in node **A** that points to node **B**.
+
+2. App
+
+   * Reconstructs the path from the root to **B** by following `parent.parentNodeId` links, then reversing:
+
+     ```json
+     activeBranchNodeIds = ["node_root", "node_3", "node_B"]
+     ```
+
+   * Sets `currentNodeId = "node_B"`.
+
+   * Updates `isActive` flags in `message.highlights`:
+
+     * Highlights whose `childNodeId` is in `activeBranchNodeIds` and immediately followed on the branch become active (bright).
+     * Other highlights become inactive (pale).
+
+   * Rerenders columns to match the new `activeBranchNodeIds`.
+
+3. No LLM request is made; branch switching reads and updates only the stored tree and branch state, then persists those changes.
+
+---
+
+## 12. Simplicity and extensibility
+
+The model is intentionally minimal:
+
+* **Single structural entity**: the node (column), with parent links, messages, and highlights.
+
+* **Single source of truth**: one JSON state in memory, mirrored in browser storage.
+
+* **Single LLM shape**: every call uses the same structure:
+
+  ```json
+  {
+    "history": [ { "role": "user" | "assistant", "text": "..." }, ... ],
+    "prompt": "..."
+  }
+  ```
+
+  and always receives:
+
+  ```json
+  {
+    "header": "Short node title",
+    "message": "Full reply in markdown..."
+  }
+  ```
+
+* **Single branching mechanism**: always from a text selection in a message, creating a child node with a parent link and a highlight in the parent message.
+
+* **Single visible view**: only nodes along `activeBranchNodeIds` are shown as columns at any time.
+
+Extensibility hooks:
+
+* Nodes can be extended with additional fields (e.g. `tags`, `summary`, `pinned`).
+* Messages can gain extra fields (e.g. `isDraft`, `attachments`, `editedAt`).
+* Highlights can be extended to support multiple child nodes per selection or richer metadata if needed.
+* Extra LLM behaviors can be layered on top of the same `{ history, prompt } → { header, message }` pattern (e.g. by encoding simple instructions into the prompt).
+
+These additions do not change the core rules:
+
+* One node per column.
+* Highlights link selections to child nodes.
+* The active branch is the only branch rendered as columns; the rest of the tree remains accessible via highlights.
+
+---
+
+## 13. Technology stack
+
+### 13.1 Framework and language
+
+* A React-based SPA or hybrid app using **TypeScript**.
+* The UI is implemented in **React**:
+
+  * Horizontal layout of columns for `activeBranchNodeIds`.
+  * Per-column message lists and linear inputs.
+  * Context input, highlights, and branching interactions.
+  * Top bar and session dropdown.
+
+All conversation state is managed on the client and hydrated from browser storage on load.
+
+### 13.2 Styling and UI components
+
+* **Tailwind CSS** (or a similar utility-first framework) for:
+
+  * Minimalistic layout.
+  * Helvetica (or system sans-serif) typography.
+  * Thin gray separators between top bar, columns, and edge bars.
+  * Root column width (e.g. `max-w-3xl`), spacing, alignment.
+  * User message style (right-aligned, 80% width, light gray background).
+
+* **Lucide icons** for:
+
+  * Square-menu button in the top bar.
+  * Arrow-down in the root placeholder.
+  * Any other simple glyphs if needed.
+
+* Small, composable components (buttons, dropdown, input fields, context input).
+
+### 13.3 Client state and persistence
+
+* A global store holds:
+
+  ```json
+  {
+    "version": 1,
+    "activeSessionId": "session_123",
+    "activeBranchNodeIds": ["node_root", "node_3", "node_7"],
+    "currentNodeId": "node_7",
+    "sessions": {
+      "session_123": {
+        "id": "session_123",
+        "title": "Intro to matrix multiplication",
+        "rootNodeId": "node_root",
+        "nodes": {
+          "node_root": { ... },
+          "node_3": { ... },
+          "node_7": { ... }
+        }
+      }
+    }
+  }
+  ```
+
+* Implementation options:
+
+  * React context + reducer, or
+  * A lightweight state library (e.g. Zustand).
+
 * On startup:
 
-  * The store attempts to load the JSON snapshot from localStorage (for example under one key such as branching_chat_state).
-  * If not found or invalid, an empty default state is created.
-* On every meaningful change (new message, new block, header update, session change):
+  * Read JSON from `localStorage` under a single key.
+  * If missing or invalid, initialize with an empty default state.
 
-  * The in-memory state is updated.
-  * A debounced write serializes the full state back into localStorage, replacing the previous snapshot.
+* On each meaningful change (new node, new message, header update, branch switch):
 
-No external database is required; all persistent data is stored in the browser.
+  * Update the in-memory store.
+  * Debounced write of the full snapshot back to `localStorage`.
 
----
+Scroll positions, focus, and selections are not persisted.
 
-### 14.4 LLM integration (OpenAI)
+### 13.4 LLM integration
 
-* All OpenAI access happens on the server side through a single Next.js route (for example at /api/chat).
-* The client sends a POST request to this route containing:
+* A single backend endpoint (e.g. `/api/chat`) mediates all LLM calls.
 
-  * The universal JSON payload described in the data spec (session info, full branch_path, current_user_input, options).
-* The server route:
+* Client sends:
+
+  ```json
+  {
+    "history": [
+      { "role": "user", "text": "..." },
+      { "role": "assistant", "text": "..." },
+      { "role": "user", "text": "[Branch created from previous text: \"...\"]" },
+      { "role": "user", "text": "Follow-up question..." },
+      { "role": "assistant", "text": "..." }
+    ],
+    "prompt": "New question here..."
+  }
+  ```
+
+  where `history` is built from the current `activeBranchNodeIds` and branch notes, and `prompt` is the current input.
+
+* Server:
 
   * Reads the OpenAI API key from environment variables.
-  * Calls the OpenAI Chat Completions API with:
 
-    * One system message describing the app’s role and required JSON output shape.
-    * One user message whose content is exactly the JSON payload (as text).
-  * Parses the model’s response as JSON with fields such as assistant_message, block_header and session_title.
-  * Returns a compact JSON response to the client with these values, or an error object if something goes wrong.
+  * Sends a system message describing the expected JSON output and that `history` + `prompt` form the context.
 
-The client never handles the API key and only communicates with the Next.js API route.
+  * Sends the `{ history, prompt }` object as the content of a user message.
 
----
+  * Parses the model’s JSON response:
 
-### 14.5 Data flow between UI, storage and LLM
+    ```json
+    {
+      "header": "Short node title",
+      "message": "Markdown reply..."
+    }
+    ```
 
-For any user action that sends a prompt (linear or branch):
+  * Returns this object directly to the client.
 
-1. The user submits text via a linear or branch input in a given block.
-2. The client store:
+The client never sees or stores the API key.
 
-    * Updates the session structure if needed (for example, creating a new block for a branch).
-    * Does not yet append a new user message to that block’s messages array; the new text is treated as in-flight input and is only added to messages once a valid assistant reply is received.
-3. A request payload is derived from the current store:
+### 13.5 Data flow between UI, storage and LLM
 
-   * session object.
-   * full branch_path from root to the current block, including all parent messages and selections.
-   * current_user_input and options.
-4. The client sends this JSON payload to the Next.js /api/chat route.
-5. When the response arrives:
+For any turn (linear or context):
 
-   * The store appends a new user message to the current block’s messages containing current_user_input.
-   * The store appends a new assistant message to the same block containing assistant_message.
-   * The block header and session title are updated if new values are provided, following the invariant that the root block’s header and the session title are always identical.
-6. The updated state is written to localStorage on the next debounced save.
+1. **UI**
 
-The UI always renders directly from the single in-memory store; localStorage is just a persistent snapshot of that store.
+   * User submits text via a linear input (current node) or context input (new branch).
 
----
+2. **State**
 
-### 14.6 Additional enhancements
+   * If it’s a context turn, create a new node with parent link and highlight, update `activeBranchNodeIds` and `currentNodeId`.
 
-The core stack remains minimal, but several additional tools fit well without changing the overall architecture:
+   * Build `history` from `activeBranchNodeIds`:
 
-* React Query (or a similar library) can manage the lifecycle of LLM calls:
+     * For each node, append its messages in `{ role, text }` form.
+     * For non-root nodes, insert a branch note line just before that node’s first message.
 
-  * Loading and error states per block.
-  * Retry behavior for failed calls.
-* A markdown renderer can be used if assistant messages should support basic formatting, lists and code-style snippets.
-* A small utility layer for:
+   * Set `prompt` to the current input text.
 
-  * Generating unique ids for sessions, blocks and messages.
-  * Normalizing timestamps and other metadata.
-* Convenience features such as keyboard shortcuts, quick-jump between columns or search over headers can be added on top of the same JSON state model and do not require changing the persistence or LLM integration layers.
+3. **Network**
+
+   * Send `{ history, prompt }` to `/api/chat`.
+
+4. **Response**
+
+   * Receive `{ header, message }`.
+   * Append a user message with `prompt` and an assistant message with `message` to the target node’s `messages`.
+   * If the node’s header is null, set it to `header`.
+
+     * If this is the root node, set the session title to the same string.
+   * Persist the updated JSON snapshot (state + sessions) to `localStorage`.
+
+The UI always renders from the in-memory store; browser storage is only a durable snapshot.
